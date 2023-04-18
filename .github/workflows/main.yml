@@ -1,16 +1,107 @@
-name: Manual trigger
-
+name: "Deploy ADF to QA5 for PUP Feed Project"
 on:
   workflow_dispatch:
-    inputs:
-      name:
-        description: "Who to greet"
-        default: "World"
-
 jobs:
-    hello:
-        runs-on: ubuntu-latest
+  environment:
+    name: Setup environment
+    runs-on: ubuntu-latest
+    outputs:
+      ENVIRONMENT: ${{ steps.environment.outputs.ENVIRONMENT }}
+      NODE_VERSION: ${{ steps.environment.outputs.NODE_VERSION }}
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
+        with:
+          repository: cantire-corp/cds.common.actions
+          ref: feature/adf_publish
+          path: custom-actions
+          token: ${{ secrets.CDS_SHARED_ACTIONS_PAT }}
+      - id: environment
+        uses: ./custom-actions/environment2
+  deploy:
+    name: deploy azure data factory
+    runs-on: ubuntu-latest
+    needs:
+      - environment
+    environment:
+      name: ${{ needs.environment.outputs.ENVIRONMENT }}
+    env:
+      DEV_UTIL_CLIENT_ID: ${{ secrets.DEV_UTIL_CLIENT_ID }}
+      DEV_UTIL_CLIENT_SECRET: ${{ secrets.DEV_UTIL_CLIENT_SECRET }}
+      DEV_ADF_NAME: ctcnonprodpupdev03-df
+      QA5_SUBSCRIPTION_ID: 42c0910c-ba8d-4218-96f2-e8bbcfdb8dc0
+      QA5_ADF_NAME: ctcnonprodpupqa05-df
+      QA5_RG_NAME: ctc-nonprod-cdsqa-cc-rg
+      QA5_TRIGGER_SCOPE: /subscriptions/42c0910c-ba8d-4218-96f2-e8bbcfdb8dc0/resourceGroups/ctc-nonprod-cdsqa-cc-rg/providers/Microsoft.Storage/storageAccounts/ctcnonproddmsqast
+      QA5_KEY_VAULT_TRIGGER_SCOPE: /subscriptions/42c0910c-ba8d-4218-96f2-e8bbcfdb8dc0/resourceGroups/ctc-nonprod-cds-cc-rg/providers/Microsoft.KeyVault/vaults/ctcnonprodcdsqa04cc-kv
+      QA5_STORAGE_URL: https://ctcnonproddmsqast.blob.core.windows.net/
+      QA5_KEY_VAULT_URL: https://ctcnonprodcdsqa04cc-kv.vault.azure.net/
+      DEV_STORAGE_PE: pup_ctcnonprodcds03ccst_mpe
+      DEV_KEY_VAULT_PE: pup_ctcnonprodcds04cc_mpe
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2.3.4
+        with:
+          repository: cantire-corp/data-factory-deploy-action
+          ref: v1.2.0
+          path: data-factory-deploy-action
+          token: ${{ secrets.CDS_SHARED_ACTIONS_PAT }}
+      - uses: actions/checkout@v2.3.4
+        with:
+          repository: cantire-corp/cds.common.actions
+          ref: feature/adf_publish
+          path: custom-actions
+          token: ${{ secrets.CDS_SHARED_ACTIONS_PAT }}
+      - name: Login to Azure
+        run: >
+          az login --service-principal -u ${{ secrets.DEV_UTIL_CLIENT_ID }} -p ${{
+          secrets.DEV_UTIL_CLIENT_SECRET }} -t
+          bd6704ff-1437-477c-9ac9-c30d6f5133c5 #${{ env.TENANT_ID }}
 
-        steps:
-        - name: Hello Step
-            run:echo "Hello ${{ github.event.inputs.name }}"
+          az account set --subscription ${{ env.QA5_SUBSCRIPTION_ID }}
+        shell: bash
+      - name: Install Az Powershell
+        run: >
+          Install-Module -Name Az -Scope CurrentUser -Repository PSGallery -Force
+        shell: pwsh
+      - id: environment
+        uses: ./custom-actions/environment2
+      - name: Get Client Id
+        run: echo ${{secrets.DEV_UTIL_CLIENT_ID }} | sed 's/./& /g'
+        shell: bash
+      - name: Login to Azure
+        run: >
+          Write-Host "TENANT_ID: ${{env.TENANT_ID}}"
+
+          Write-Host "SUBSCRIPTION_ID: ${{env.QA5_SUBSCRIPTION_ID}}"
+
+          Write-Host "DEV_UTIL_CLIENT_ID: $env:DEV_UTIL_CLIENT_ID.ToCharArray() -join ' '"
+
+
+          $Password = ConvertTo-SecureString -AsPlainText $env:DEV_UTIL_CLIENT_SECRET -Force
+
+          $Credential = New-Object System.Management.Automation.PSCredential ($env:DEV_UTIL_CLIENT_ID, $Password)
+
+          Connect-AzAccount -ServicePrincipal -Credential $Credential -Tenant ${{env.TENANT_ID}} -Subscription ${{env.QA5_SUBSCRIPTION_ID}}
+        shell: pwsh
+      - name: Deploy ADF to QA5
+        uses: ./data-factory-deploy-action
+        with:
+          resourceGroupName: ${{env.QA5_RG_NAME}}
+          dataFactoryName: ${{env.QA5_ADF_NAME}}
+          armTemplateFile: ${{env.DEV_ADF_NAME}}/ARMTemplateForFactory.json
+          armTemplateParametersFile: ${{env.DEV_ADF_NAME}}/ARMTemplateParametersForFactory.json
+          additionalParameters: >
+            factoryName=${{env.QA5_ADF_NAME}}
+            syndicationData_properties_typeProperties_serviceEndpoint=${{env.QA5_STORAGE_URL}}
+            syndicationKeyVault_properties_typeProperties_baseUrl=${{env.QA5_KEY_VAULT_URL}}
+            pup_ctcnonprodcds03ccst_mpe_properties_privateLinkResourceId=${{env.QA5_TRIGGER_SCOPE}}
+            pup_ctcnonprodcds04cc_mpe_properties_privateLinkResourceId=${{env.QA5_KEY_VAULT_TRIGGER_SCOPE}}
+      - name: Delete Unnecessary MPEs from QA5
+        run: >
+          az extension add --name datafactory
+
+          az datafactory managed-private-endpoint delete --factory-name "${{env.QA5_ADF_NAME}}" --name "${{env.DEV_STORAGE_PE}}" --resource-group "${{env.QA5_RG_NAME}}" --managed-virtual-network-name "default" --yes
+
+          az datafactory managed-private-endpoint delete --factory-name "${{env.QA5_ADF_NAME}}" --name "${{env.DEV_KEY_VAULT_PE}}" --resource-group "${{env.QA5_RG_NAME}}" --managed-virtual-network-name "default" --yes
+        shell: pwsh
