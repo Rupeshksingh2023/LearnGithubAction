@@ -1,7 +1,7 @@
 name: Manual test
 
 on:
-  workflow_dispatch
+  workflow_dispatch:
 
 jobs:
     hello:
